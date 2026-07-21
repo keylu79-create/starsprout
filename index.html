@@ -537,7 +537,14 @@ function loadData() {
       // Set data to current user's slice
       if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
         const u = appData.users[appData.currentUserPhone];
-        data = { families: u.families || [], currentFamilyId: u.currentFamilyId || null };
+        if (!u.families) u.families = [];
+        data = { families: u.families, currentFamilyId: u.currentFamilyId || null };
+        // Auto-repair missing currentFamilyId if families exist
+        if (u.families.length > 0 && !data.currentFamilyId) {
+          data.currentFamilyId = u.families[0].id;
+          u.currentFamilyId = data.currentFamilyId;
+          saveAppData();
+        }
       } else {
         data = { families: [], currentFamilyId: null };
       }
@@ -559,19 +566,21 @@ function loadData() {
       saveAppData();
     }
   } catch(e) {
+    // Don't save empty state on error - preserves existing data
+    console.warn('loadData error, using empty in-memory state:', e);
     appData = { version: 3, currentUserPhone: null, users: {}, legacyFamilies: null };
     data = { families: [], currentFamilyId: null };
-    saveAppData();
   }
 }
 
 function saveAppData() { localStorage.setItem(STORAGE_KEY, JSON.stringify(appData)); }
 
 function saveData() {
-  // Sync current user's data slice back to appData
+  // Sync working data back to current user's stored data
   if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
     const u = appData.users[appData.currentUserPhone];
-    u.families = data.families;
+    // Create new array copy to avoid reference issues after JSON round-trip
+    u.families = [...data.families];
     u.currentFamilyId = data.currentFamilyId;
   }
   saveAppData();
@@ -597,9 +606,12 @@ function loginUser(phone) {
       appData.users[phone].currentFamilyId = appData.legacyFamilies[0].id;
       appData.legacyFamilies = null;
     }
+    saveAppData();
   }
+  // Load user's data slice into working data
   const u = appData.users[phone];
-  data = { families: u.families || [], currentFamilyId: u.currentFamilyId || null };
+  if (!u.families) u.families = [];
+  data = { families: u.families, currentFamilyId: u.currentFamilyId || null };
   saveAppData();
 }
 
@@ -635,6 +647,15 @@ const App = {
    this.enterApp();
  },
   enterApp() {
+    // Validate data integrity: if data.families is empty but stored user has families, reload
+    if ((!data.families || data.families.length === 0) && appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
+      const u = appData.users[appData.currentUserPhone];
+      if (u.families && u.families.length > 0) {
+        data.families = u.families;
+        data.currentFamilyId = u.currentFamilyId || u.families[0].id;
+        saveAppData();
+      }
+    }
     if (data.families.length === 0 || !data.currentFamilyId) {
       this.showPage('login');
       this.renderLoginList();
