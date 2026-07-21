@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>小伴星 StarSprout · 和宠物伙伴一起成长</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 :root {
@@ -428,7 +429,99 @@ const STORAGE_KEY = 'starsprout_v3';
 const BACKUP_KEY = 'starsprout_v3_backup';
 const OLD_STORAGE_KEY = 'punchAppData_v2';
 const OLD_STORAGE_KEY_V1 = 'punchAppData';
-const APP_VERSION = '⭐FIX-v2';
+const APP_VERSION = '☁️v3-Cloud';
+
+// Supabase
+const SUPABASE_URL = 'https://evbrmoxyypiwvugvolua.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV2YnJtb3h5eXBpd3Z1Z3ZvbHVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ2MzI5NDgsImV4cCI6MjEwMDIwODk0OH0.3z3Lnzd4seKr3eRhxHCRn5HVLecchuM6sBy6uUhRhgA';
+let sb = null;
+let supabaseReady = false;
+
+function initSupabase() {
+  try {
+    if (typeof supabase !== 'undefined' && supabase.createClient) {
+      sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+      supabaseReady = true;
+      console.log('%c[StarSprout ☁️] Supabase initialized', 'color:#10b981');
+    } else {
+      console.warn('[StarSprout ☁️] Supabase SDK not loaded, using offline mode');
+    }
+  } catch(e) {
+    console.warn('[StarSprout ☁️] Supabase init failed:', e.message);
+  }
+}
+
+async function loadFromSupabase(phone) {
+  if (!supabaseReady || !sb) return null;
+  try {
+    const { data: row, error } = await sb.from('user_data').select('data').eq('phone', phone).single();
+    if (error && error.code !== 'PGRST116') {
+      console.warn('[StarSprout ☁️] Load failed:', error.message);
+      return null;
+    }
+    if (row && row.data) {
+      console.log('%c[StarSprout ☁️] Data loaded from cloud for:', phone, 'color:#10b981');
+      return row.data;
+    }
+    console.log('[StarSprout ☁️] No cloud data for:', phone);
+    return null;
+  } catch(e) {
+    console.warn('[StarSprout ☁️] Load error:', e.message);
+    return null;
+  }
+}
+
+async function syncToSupabase(phone) {
+  if (!supabaseReady || !sb) return;
+  const userData = appData.users[phone];
+  if (!userData) return;
+  try {
+    const payload = {
+      phone: phone,
+      data: userData,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await sb.from('user_data').upsert(payload);
+    if (error) {
+      console.warn('[StarSprout ☁️] Sync failed:', error.message);
+    } else {
+      console.log('%c[StarSprout ☁️] Synced to cloud ✓', 'color:#10b981');
+    }
+  } catch(e) {
+    console.warn('[StarSprout ☁️] Sync error:', e.message);
+  }
+}
+
+async function migrateLocalToSupabase(phone) {
+  if (!supabaseReady || !sb) return;
+  const userData = appData.users[phone];
+  if (!userData || !userData.families || userData.families.length === 0) return;
+  try {
+    // Check if Supabase already has data for this user
+    const { data: existing } = await sb.from('user_data').select('phone').eq('phone', phone).single();
+    if (existing) {
+      console.log('[StarSprout ☁️] Cloud data already exists, loading from cloud...');
+      const cloudData = await loadFromSupabase(phone);
+      if (cloudData && cloudData.families && cloudData.families.length > 0) {
+        // Cloud has data - check which is newer
+        const localTime = userData.createdAt || '1970-01-01';
+        const cloudTime = cloudData.createdAt || '1970-01-01';
+        if (cloudTime >= localTime) {
+          // Cloud is newer, use cloud data
+          appData.users[phone] = cloudData;
+          console.log('%c[StarSprout ☁️] Using cloud data (newer)', 'color:#10b981');
+          return;
+        }
+      }
+    }
+    // Local data is newer or cloud has no data - upload local to cloud
+    console.log('[StarSprout ☁️] Uploading local data to cloud...');
+    await syncToSupabase(phone);
+    console.log('%c[StarSprout ☁️] Migration complete!', 'color:#10b981');
+  } catch(e) {
+    console.warn('[StarSprout ☁️] Migration error:', e.message);
+  }
+}
 
 const defaultPetTypes = {
   cat: { emoji: '🐱', name: '小猫' },
@@ -671,8 +764,11 @@ function loadData() {
 function saveAppData() {
   const json = JSON.stringify(appData);
   localStorage.setItem(STORAGE_KEY, json);
-  // Always keep a backup
   try { localStorage.setItem(BACKUP_KEY, json); } catch(e) { console.warn('[StarSprout] Backup write failed, storage may be full'); }
+  // Sync to Supabase cloud (fire-and-forget)
+  if (appData.currentUserPhone) {
+    syncToSupabase(appData.currentUserPhone);
+  }
 }
 
 function saveData() {
@@ -696,31 +792,52 @@ function currentUserData() {
   return appData.users[appData.currentUserPhone];
 }
 
-function loginUser(phone) {
+async function loginUser(phone) {
   console.log('%c[StarSprout] loginUser phone=' + phone, 'color:#3b82f6;font-weight:bold');
   console.log('[StarSprout] Before login - users in storage:', Object.keys(appData.users), 'currentUserPhone:', appData.currentUserPhone);
 
   appData.currentUserPhone = phone;
+
+  // Check if user exists in localStorage
   if (!appData.users[phone]) {
-    // New user registration
-    console.log('[StarSprout] NEW user registration for:', phone);
-    appData.users[phone] = {
-      phone: phone,
-      createdAt: new Date().toISOString(),
-      families: [],
-      currentFamilyId: null,
-    };
-    // Assign legacy families if any
-    if (appData.legacyFamilies && appData.legacyFamilies.length > 0) {
-      console.log('[StarSprout] Assigning legacy families:', appData.legacyFamilies.length);
-      appData.users[phone].families = appData.legacyFamilies;
-      appData.users[phone].currentFamilyId = appData.legacyFamilies[0].id;
-      appData.legacyFamilies = null;
+    // No local data — try loading from Supabase cloud
+    console.log('[StarSprout] No local data, trying cloud...');
+    let cloudData = null;
+    if (supabaseReady) {
+      cloudData = await loadFromSupabase(phone);
     }
-    saveAppData();
+
+    if (cloudData && cloudData.families && cloudData.families.length > 0) {
+      // Found data in cloud! Restore to local
+      console.log('%c[StarSprout ☁️] RESTORED from cloud! families:', cloudData.families.length, 'color:#10b981;font-weight:bold');
+      appData.users[phone] = cloudData;
+      saveAppData();
+    } else {
+      // Truly new user
+      console.log('[StarSprout] NEW user registration for:', phone);
+      appData.users[phone] = {
+        phone: phone,
+        createdAt: new Date().toISOString(),
+        families: [],
+        currentFamilyId: null,
+      };
+      // Assign legacy families if any
+      if (appData.legacyFamilies && appData.legacyFamilies.length > 0) {
+        console.log('[StarSprout] Assigning legacy families:', appData.legacyFamilies.length);
+        appData.users[phone].families = appData.legacyFamilies;
+        appData.users[phone].currentFamilyId = appData.legacyFamilies[0].id;
+        appData.legacyFamilies = null;
+      }
+      saveAppData();
+    }
   } else {
     console.log('[StarSprout] RETURNING user, existing families:', appData.users[phone].families.length);
+    // Existing local user — migrate to cloud if needed
+    if (supabaseReady) {
+      migrateLocalToSupabase(phone);
+    }
   }
+
   // Load user's data slice into working data
   const u = appData.users[phone];
   if (!u.families) u.families = [];
@@ -1150,7 +1267,7 @@ function sendVerificationCode() {
   }, 1000);
 }
 
-function verifyAndLogin() {
+async function verifyAndLogin() {
   const inputCode = document.getElementById('codeInput').value.trim();
   if (!inputCode) { alert('请输入验证码'); return; }
   if (!pendingVerification.code) { alert('请先获取验证码'); return; }
@@ -1159,8 +1276,8 @@ function verifyAndLogin() {
   const phone = pendingVerification.phone;
   const isNew = !appData.users[phone];
 
-  // Login or register
-  loginUser(phone);
+  // Login or register (async - may fetch from Supabase cloud)
+  await loginUser(phone);
 
   // Clear pending
   if (pendingVerification.timer) clearInterval(pendingVerification.timer);
@@ -2013,6 +2130,9 @@ function switchRecordTab(tab) {
 
 // ========== INIT ==========
 document.addEventListener('DOMContentLoaded', () => {
+  // Init Supabase cloud sync
+  initSupabase();
+
   // Debug mode via URL hash
   if (window.location.hash === '#debug' || window.location.search.includes('debug')) {
     App.showPage('debug');
