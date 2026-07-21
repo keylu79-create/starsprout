@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>小伴星 StarSprout · 和宠物伙伴一起成长</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<!-- Supabase: using native fetch (no external CDN needed) -->
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 :root {
@@ -431,95 +431,95 @@ const OLD_STORAGE_KEY = 'punchAppData_v2';
 const OLD_STORAGE_KEY_V1 = 'punchAppData';
 const APP_VERSION = '☁️v3-Cloud';
 
-// Supabase
+// Supabase — lightweight native fetch (zero CDN dependency)
 const SUPABASE_URL = 'https://evbrmoxyypiwvugvolua.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV2YnJtb3h5eXBpd3Z1Z3ZvbHVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ2MzI5NDgsImV4cCI6MjEwMDIwODk0OH0.3z3Lnzd4seKr3eRhxHCRn5HVLecchuM6sBy6uUhRhgA';
-let sb = null;
-let supabaseReady = false;
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV2YnJvb3h5eXBpd3Z1Z3ZvbHVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ2MzI5NDgsImV4cCI6MjEwMDIwODk0OH0.3z3Lnzd4seKr3eRhxHCRn5HVLecchuM6sBy6uUhRhgA';
+let supabaseReady = true;
+let sbOnline = false;
+
+function _sheaders() {
+  return { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' };
+}
+
+async function _sGet(path) {
+  const r = await fetch(SUPABASE_URL + path, { headers: _sheaders() });
+  sbOnline = true;
+  return r;
+}
+
+async function _sPost(path, body) {
+  const r = await fetch(SUPABASE_URL + path, {
+    method: 'POST',
+    headers: { ..._sheaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(body),
+  });
+  sbOnline = true;
+  return r;
+}
 
 function initSupabase() {
-  try {
-    if (typeof supabase !== 'undefined' && supabase.createClient) {
-      sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-      supabaseReady = true;
-      console.log('%c[StarSprout ☁️] Supabase initialized', 'color:#10b981');
-    } else {
-      console.warn('[StarSprout ☁️] Supabase SDK not loaded, using offline mode');
-    }
-  } catch(e) {
-    console.warn('[StarSprout ☁️] Supabase init failed:', e.message);
-  }
+  console.log('%c[☁️] Supabase native client ready (no CDN)', 'color:#10b981');
 }
 
 async function loadFromSupabase(phone) {
-  if (!supabaseReady || !sb) return null;
   try {
-    const { data: row, error } = await sb.from('user_data').select('data').eq('phone', phone).single();
-    if (error && error.code !== 'PGRST116') {
-      console.warn('[StarSprout ☁️] Load failed:', error.message);
+    const r = await _sGet('/rest/v1/user_data?select=data&phone=eq.' + encodeURIComponent(phone));
+    if (!r.ok) {
+      if (r.status === 406) { console.log('[☁️] No cloud data for:', phone); return null; }
+      console.warn('[☁️] Load HTTP', r.status);
       return null;
     }
-    if (row && row.data) {
-      console.log('%c[StarSprout ☁️] Data loaded from cloud for:', phone, 'color:#10b981');
-      return row.data;
+    const rows = await r.json();
+    if (rows.length > 0 && rows[0].data) {
+      console.log('%c[☁️] Loaded from cloud ✓', 'color:#10b981');
+      return rows[0].data;
     }
-    console.log('[StarSprout ☁️] No cloud data for:', phone);
+    console.log('[☁️] No cloud data for:', phone);
     return null;
   } catch(e) {
-    console.warn('[StarSprout ☁️] Load error:', e.message);
+    console.warn('[☁️] Load error:', e.message);
     return null;
   }
 }
 
 async function syncToSupabase(phone) {
-  if (!supabaseReady || !sb) return;
   const userData = appData.users[phone];
   if (!userData) return;
   try {
-    const payload = {
+    const r = await _sPost('/rest/v1/user_data', {
       phone: phone,
       data: userData,
       updated_at: new Date().toISOString(),
-    };
-    const { error } = await sb.from('user_data').upsert(payload);
-    if (error) {
-      console.warn('[StarSprout ☁️] Sync failed:', error.message);
+    });
+    if (r.ok) {
+      console.log('%c[☁️] Synced to cloud ✓', 'color:#10b981');
     } else {
-      console.log('%c[StarSprout ☁️] Synced to cloud ✓', 'color:#10b981');
+      const errText = await r.text();
+      console.warn('[☁️] Sync HTTP', r.status, errText.substring(0, 200));
     }
   } catch(e) {
-    console.warn('[StarSprout ☁️] Sync error:', e.message);
+    console.warn('[☁️] Sync error:', e.message);
   }
 }
 
 async function migrateLocalToSupabase(phone) {
-  if (!supabaseReady || !sb) return;
   const userData = appData.users[phone];
   if (!userData || !userData.families || userData.families.length === 0) return;
   try {
-    // Check if Supabase already has data for this user
-    const { data: existing } = await sb.from('user_data').select('phone').eq('phone', phone).single();
-    if (existing) {
-      console.log('[StarSprout ☁️] Cloud data already exists, loading from cloud...');
-      const cloudData = await loadFromSupabase(phone);
-      if (cloudData && cloudData.families && cloudData.families.length > 0) {
-        // Cloud has data - check which is newer
-        const localTime = userData.createdAt || '1970-01-01';
-        const cloudTime = cloudData.createdAt || '1970-01-01';
-        if (cloudTime >= localTime) {
-          // Cloud is newer, use cloud data
-          appData.users[phone] = cloudData;
-          console.log('%c[StarSprout ☁️] Using cloud data (newer)', 'color:#10b981');
-          return;
-        }
+    const cloudData = await loadFromSupabase(phone);
+    if (cloudData && cloudData.families && cloudData.families.length > 0) {
+      const localTime = userData.createdAt || '1970-01-01';
+      const cloudTime = cloudData.createdAt || '1970-01-01';
+      if (cloudTime >= localTime) {
+        appData.users[phone] = cloudData;
+        console.log('%c[☁️] Using cloud data (newer)', 'color:#10b981');
+        return;
       }
     }
-    // Local data is newer or cloud has no data - upload local to cloud
-    console.log('[StarSprout ☁️] Uploading local data to cloud...');
+    console.log('[☁️] Uploading local data to cloud...');
     await syncToSupabase(phone);
-    console.log('%c[StarSprout ☁️] Migration complete!', 'color:#10b981');
   } catch(e) {
-    console.warn('[StarSprout ☁️] Migration error:', e.message);
+    console.warn('[☁️] Migrate error:', e.message);
   }
 }
 
