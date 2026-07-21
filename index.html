@@ -375,6 +375,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
     </div>
     <div id="parentContent"></div>
   </div>
+
+  <!-- Debug Page (accessible via ?debug or #debug) -->
+  <div class="page" id="page-debug">
+    <div class="header"><div class="header-top"><h1>🔧 数据诊断</h1></div><div class="sub" id="debugVersionLine">版本: 加载中... | 数据调试工具</div></div>
+    <div style="padding:16px;">
+      <div style="background:var(--cream);border-radius:14px;padding:16px;margin-bottom:12px;">
+        <div style="font-weight:700;margin-bottom:8px;">📦 localStorage 数据状态</div>
+        <div id="debugStorageInfo" style="font-size:13px;line-height:1.8;"></div>
+      </div>
+      <div style="background:var(--cream);border-radius:14px;padding:16px;margin-bottom:12px;">
+        <div style="font-weight:700;margin-bottom:8px;">👤 内存中的 appData</div>
+        <pre id="debugAppData" style="font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;"></pre>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-sm" onclick="debugRefresh()">🔄 刷新</button>
+        <button class="btn btn-outline btn-sm" onclick="debugExportData()">📋 导出数据</button>
+        <button class="btn btn-danger btn-sm" onclick="debugResetData()">💣 清空数据</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Tab Bar -->
@@ -405,8 +425,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 <script>
 // ========== DATA LAYER ==========
 const STORAGE_KEY = 'starsprout_v3';
+const BACKUP_KEY = 'starsprout_v3_backup';
 const OLD_STORAGE_KEY = 'punchAppData_v2';
 const OLD_STORAGE_KEY_V1 = 'punchAppData';
+const APP_VERSION = '⭐FIX-v2';
 
 const defaultPetTypes = {
   cat: { emoji: '🐱', name: '小猫' },
@@ -528,17 +550,42 @@ function migrateV2() {
 }
 
 function loadData() {
+  console.log('%c[StarSprout ' + APP_VERSION + '] loadData START', 'color:#7c3aed;font-weight:bold');
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+    console.log('[StarSprout] STORAGE_KEY raw exists:', !!raw, raw ? 'length=' + raw.length : 'null');
+
     if (raw) {
       appData = JSON.parse(raw);
+      console.log('[StarSprout] Parsed appData:', {
+        version: appData.version,
+        currentUserPhone: appData.currentUserPhone,
+        userCount: appData.users ? Object.keys(appData.users).length : 0,
+        userPhones: appData.users ? Object.keys(appData.users) : [],
+      });
+
       if (!appData.users) appData.users = {};
       if (!appData.currentUserPhone) appData.currentUserPhone = null;
+
+      // === BACKUP MECHANISM: Save a backup immediately after successful load ===
+      try {
+        const backupRaw = JSON.stringify(appData);
+        localStorage.setItem(BACKUP_KEY, backupRaw);
+        console.log('[StarSprout] Backup saved, size:', backupRaw.length);
+      } catch(be) {
+        console.warn('[StarSprout] Backup save failed:', be);
+      }
+
       // Set data to current user's slice
       if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
         const u = appData.users[appData.currentUserPhone];
         if (!u.families) u.families = [];
         data = { families: u.families, currentFamilyId: u.currentFamilyId || null };
+        console.log('[StarSprout] Loaded user data:', {
+          phone: appData.currentUserPhone,
+          familyCount: u.families.length,
+          currentFamilyId: data.currentFamilyId,
+        });
         // Auto-repair missing currentFamilyId if families exist
         if (u.families.length > 0 && !data.currentFamilyId) {
           data.currentFamilyId = u.families[0].id;
@@ -546,9 +593,39 @@ function loadData() {
           saveAppData();
         }
       } else {
+        console.log('[StarSprout] No current user or user data not found, showing empty state');
         data = { families: [], currentFamilyId: null };
+        // If users exist in storage, log them for debugging
+        if (appData.users && Object.keys(appData.users).length > 0) {
+          console.log('[StarSprout] NOTE: users exist in storage but no currentUserPhone set. Phones:', Object.keys(appData.users));
+        }
       }
     } else {
+      console.log('[StarSprout] No STORAGE_KEY found, trying backup...');
+      // === RECOVERY: Try to load from backup ===
+      const backupRaw = localStorage.getItem(BACKUP_KEY);
+      if (backupRaw) {
+        try {
+          const backupData = JSON.parse(backupRaw);
+          const backupUserCount = backupData.users ? Object.keys(backupData.users).length : 0;
+          console.log('[StarSprout] Backup found, users:', backupUserCount);
+          if (backupUserCount > 0) {
+            // Restore from backup!
+            appData = backupData;
+            localStorage.setItem(STORAGE_KEY, backupRaw);
+            console.log('%c[StarSprout] DATA RESTORED FROM BACKUP! ' + backupUserCount + ' users recovered', 'color:#10b981;font-weight:bold');
+            if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
+              const u = appData.users[appData.currentUserPhone];
+              data = { families: u.families || [], currentFamilyId: u.currentFamilyId || null };
+            } else {
+              data = { families: [], currentFamilyId: null };
+            }
+            return; // Skip migration
+          }
+        } catch(be) { console.warn('[StarSprout] Backup parse failed:', be); }
+      }
+
+      console.log('[StarSprout] No backup, running migration...');
       // Migrate from v2 or v1
       const v2Families = migrateV2();
       if (v2Families && v2Families.length > 0) {
@@ -566,21 +643,49 @@ function loadData() {
       saveAppData();
     }
   } catch(e) {
-    // Don't save empty state on error - preserves existing data
-    console.warn('loadData error, using empty in-memory state:', e);
+    // CRITICAL: Never save empty state on error - preserves existing data
+    console.error('%c[StarSprout] loadData ERROR (data NOT overwritten):', 'color:#ef4444;font-weight:bold', e);
+    // Try backup recovery
+    const backupRaw = localStorage.getItem(BACKUP_KEY);
+    if (backupRaw) {
+      try {
+        appData = JSON.parse(backupRaw);
+        console.log('%c[StarSprout] Recovered from backup after error!', 'color:#f59e0b;font-weight:bold');
+        localStorage.setItem(STORAGE_KEY, backupRaw);
+        if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
+          const u = appData.users[appData.currentUserPhone];
+          data = { families: u.families || [], currentFamilyId: u.currentFamilyId || null };
+        } else {
+          data = { families: [], currentFamilyId: null };
+        }
+        return;
+      } catch(be) { console.warn('[StarSprout] Backup recovery also failed:', be); }
+    }
     appData = { version: 3, currentUserPhone: null, users: {}, legacyFamilies: null };
     data = { families: [], currentFamilyId: null };
   }
+  console.log('%c[StarSprout] loadData DONE. data.families:', 'color:#7c3aed', data.families.length, 'currentFamilyId:', data.currentFamilyId);
 }
 
-function saveAppData() { localStorage.setItem(STORAGE_KEY, JSON.stringify(appData)); }
+function saveAppData() {
+  const json = JSON.stringify(appData);
+  localStorage.setItem(STORAGE_KEY, json);
+  // Always keep a backup
+  try { localStorage.setItem(BACKUP_KEY, json); } catch(e) { console.warn('[StarSprout] Backup write failed, storage may be full'); }
+}
 
 function saveData() {
   // Sync working data back to current user's stored data
   if (appData.currentUserPhone && appData.users[appData.currentUserPhone]) {
     const u = appData.users[appData.currentUserPhone];
-    // Create new array copy to avoid reference issues after JSON round-trip
-    u.families = [...data.families];
+    // Preserve same array reference to avoid data.families pointing to stale reference
+    // Instead of reassigning, we keep u.families === data.families (same reference)
+    // Only sync if they diverged (after JSON round-trip reload)
+    if (u.families !== data.families) {
+      // During loadData, data.families may be a fresh reference from JSON parse
+      // In that case, update u.families to match
+      u.families = data.families;
+    }
     u.currentFamilyId = data.currentFamilyId;
   }
   saveAppData();
@@ -591,9 +696,13 @@ function currentUserData() {
 }
 
 function loginUser(phone) {
+  console.log('%c[StarSprout] loginUser phone=' + phone, 'color:#3b82f6;font-weight:bold');
+  console.log('[StarSprout] Before login - users in storage:', Object.keys(appData.users), 'currentUserPhone:', appData.currentUserPhone);
+
   appData.currentUserPhone = phone;
   if (!appData.users[phone]) {
     // New user registration
+    console.log('[StarSprout] NEW user registration for:', phone);
     appData.users[phone] = {
       phone: phone,
       createdAt: new Date().toISOString(),
@@ -602,16 +711,20 @@ function loginUser(phone) {
     };
     // Assign legacy families if any
     if (appData.legacyFamilies && appData.legacyFamilies.length > 0) {
+      console.log('[StarSprout] Assigning legacy families:', appData.legacyFamilies.length);
       appData.users[phone].families = appData.legacyFamilies;
       appData.users[phone].currentFamilyId = appData.legacyFamilies[0].id;
       appData.legacyFamilies = null;
     }
     saveAppData();
+  } else {
+    console.log('[StarSprout] RETURNING user, existing families:', appData.users[phone].families.length);
   }
   // Load user's data slice into working data
   const u = appData.users[phone];
   if (!u.families) u.families = [];
   data = { families: u.families, currentFamilyId: u.currentFamilyId || null };
+  console.log('[StarSprout] loginUser result - data.families:', data.families.length, 'currentFamilyId:', data.currentFamilyId);
   saveAppData();
 }
 
@@ -691,7 +804,7 @@ const App = {
   showPage(pageId) {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('page-'+pageId).classList.add('active');
-    document.getElementById('app').classList.toggle('hide-tab-bar', ['phonelogin','login','parent'].includes(pageId));
+    document.getElementById('app').classList.toggle('hide-tab-bar', ['phonelogin','login','parent','debug'].includes(pageId));
   },
  nav(tab) {
    this.currentTab = tab;
@@ -1898,7 +2011,100 @@ function switchRecordTab(tab) {
 }
 
 // ========== INIT ==========
-document.addEventListener('DOMContentLoaded', () => App.init());
+document.addEventListener('DOMContentLoaded', () => {
+  // Debug mode via URL hash
+  if (window.location.hash === '#debug' || window.location.search.includes('debug')) {
+    App.showPage('debug');
+    setTimeout(debugRefresh, 100);
+    return;
+  }
+  App.init();
+  // Expose debug functions globally
+  window.__debugInfo = () => debugRefresh();
+});
+
+// ========== DEBUG TOOLS ==========
+function debugRefresh() {
+  // Set version display
+  const verEl = document.getElementById('debugVersionLine');
+  if (verEl) verEl.textContent = '版本: ' + APP_VERSION + ' | 数据调试工具';
+
+  const storageRaw = localStorage.getItem(STORAGE_KEY);
+  const backupRaw = localStorage.getItem(BACKUP_KEY);
+  const infoEl = document.getElementById('debugStorageInfo');
+  const dataEl = document.getElementById('debugAppData');
+
+  let info = '';
+  info += '版本: ' + APP_VERSION + '\n';
+  info += 'STORAGE_KEY (starsprout_v3): ';
+  if (storageRaw) {
+    try {
+      const parsed = JSON.parse(storageRaw);
+      info += '长度=' + storageRaw.length + ', 用户数=' + (parsed.users ? Object.keys(parsed.users).length : 0) + '\n';
+      info += 'currentUserPhone: ' + (parsed.currentUserPhone || '(未设置)') + '\n';
+      if (parsed.users && Object.keys(parsed.users).length > 0) {
+        for (const [phone, userData] of Object.entries(parsed.users)) {
+          info += '  用户 ' + phone + ': ' + (userData.families ? userData.families.length : 0) + ' 个家庭\n';
+          if (userData.families && userData.families.length > 0) {
+            userData.families.forEach(f => {
+              info += '    - ' + f.name + ' (' + (f.children ? f.children.length : 0) + ' 个孩子)\n';
+            });
+          }
+        }
+      }
+    } catch(e) {
+      info += '解析失败: ' + e.message + '\n';
+    }
+  } else {
+    info += '不存在 (空)\n';
+  }
+
+  info += '\nBACKUP_KEY (备份): ';
+  if (backupRaw) {
+    try {
+      const parsed = JSON.parse(backupRaw);
+      info += '长度=' + backupRaw.length + ', 用户数=' + (parsed.users ? Object.keys(parsed.users).length : 0);
+    } catch(e) {
+      info += '解析失败';
+    }
+  } else {
+    info += '不存在 (空)';
+  }
+  infoEl.textContent = info;
+
+  // Current in-memory state
+  if (dataEl) {
+    dataEl.textContent = JSON.stringify({ appData, data }, null, 2);
+  }
+}
+
+function debugExportData() {
+  const storageRaw = localStorage.getItem(STORAGE_KEY);
+  if (storageRaw) {
+    const blob = new Blob([storageRaw], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'starsprout-backup-' + new Date().toISOString().slice(0,10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  } else {
+    alert('localStorage 中没有数据可导出');
+  }
+}
+
+function debugResetData() {
+  if (confirm('⚠️ 确定要清空所有本地数据吗？此操作不可撤销！\n\n建议先导出备份。')) {
+    if (confirm('再次确认：删除所有家庭、孩子和积分数据？')) {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(BACKUP_KEY);
+      alert('数据已清空。刷新页面后生效。');
+      debugRefresh();
+    }
+  }
+}
+
+// ========== INIT (original) ==========
 </script>
 </body>
 </html>
